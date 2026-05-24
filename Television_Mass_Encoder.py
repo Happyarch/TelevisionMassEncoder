@@ -2,7 +2,6 @@ import os
 import subprocess
 import random
 import time
-import fcntl
 import shutil
 import argparse
 import shlex
@@ -11,6 +10,9 @@ import queue
 import signal
 import sys
 import logging
+import select
+import termios
+import tty
 
 
 FFMPEG_PATH = "ffmpeg"
@@ -20,7 +22,7 @@ NUM_WORKERS = 5
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Distributed AV1 encoder client with locking."
+        description="Distributed video encoder with live terminal output and detach support."
     )
     parser.add_argument(
         "--source-dir", type=str, required=True, help="Path to input videos directory"
@@ -31,13 +33,11 @@ def parse_args():
     parser.add_argument(
         "--ffmpeg-flags", type=str, required=True, help="Flags to pass to ffmpeg"
     )
-    # --- REFACTORED: Changed --debug_enable to behave as a simple boolean and removed the str2bool function ---
     parser.add_argument(
         "--debug_enable",
         action="store_true",
-        help="Enable debug messaging",
+        help="Write the full FFmpeg command to the log for each file",
     )
-    # --- REFACTORED: Added --use-ramdisk argument ---
     parser.add_argument(
         "--use-ramdisk",
         action="store_true",
@@ -46,7 +46,7 @@ def parse_args():
     parser.add_argument(
         "--output-extension",
         type=str,
-        help="Specify the file extension of the output/its container. Default: .mkv",
+        help="Output container extension (default: .mkv)",
     )
     parser.add_argument(
         "--input-extensions",
@@ -71,44 +71,15 @@ def parse_args():
     return parser.parse_args()
 
 
-
 def get_media_files(source_dir, input_exts=None):
-    """
-    Return shuffled list of media files in source_dir matching input_exts.
-
-    input_exts: colon-separated string of extensions without leading dot, e.g. "mp4:mkv"
-                If None, defaults to common FFmpeg-supported formats.
-    """
-    # Default extensions
+    """Return a shuffled list of media files in source_dir matching input_exts."""
     default_exts = (
-        ".mkv",
-        ".mp4",
-        ".mov",
-        ".avi",
-        ".webm",
-        ".divx",
-        ".vob",
-        ".evo",
-        ".ogv",
-        ".ogx",
-        ".flv",
-        ".f4v",
-        ".aac",
-        ".flac",
-        ".mp3",
-        ".ogg",
-        ".opus",
-        ".alac",
-        ".mka",
-        ".pcm",
-        ".aiff",
-        ".wav",
-        ".cda",
-        ".ape",
+        ".mkv", ".mp4", ".mov", ".avi", ".webm", ".divx", ".vob", ".evo",
+        ".ogv", ".ogx", ".flv", ".f4v", ".aac", ".flac", ".mp3", ".ogg",
+        ".opus", ".alac", ".mka", ".pcm", ".aiff", ".wav", ".cda", ".ape",
     )
 
     if input_exts:
-        # Split on colon, strip whitespace, and ensure each starts with "."
         exts_to_use = tuple(
             f".{ext.strip().lstrip('.')}"
             for ext in input_exts.split(":")
@@ -120,9 +91,6 @@ def get_media_files(source_dir, input_exts=None):
     files = [f for f in os.listdir(source_dir) if f.lower().endswith(exts_to_use)]
     random.shuffle(files)
     return files
-
-
-# --- REFACTORED: Removed unused lock_file() function ---
 
 
 def get_output_path(output_dir, file_name, output_extension):
@@ -138,7 +106,7 @@ def get_output_path(output_dir, file_name, output_extension):
 
 
 def setup_logging(main_pid=None, is_main=False):
-    """Setup logging for this Python process (one log file per process)."""
+    """Set up a file-only logger for this process."""
     pid = os.getpid()
 
     if is_main:
@@ -154,23 +122,18 @@ def setup_logging(main_pid=None, is_main=False):
     logger.setLevel(logging.INFO)
 
     if not logger.handlers:
-        # File handler (always active)
         fh = logging.FileHandler(log_file, mode="a")
         fh.setLevel(logging.INFO)
-        fh_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-        fh.setFormatter(fh_formatter)
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         logger.addHandler(fh)
 
-        # Stream handler (active for main process and for a brief time in workers)
-        sh = logging.StreamHandler()
-        sh.setLevel(logging.INFO)
-        sh_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-        sh.setFormatter(sh_formatter)
-        if not is_main:
-            sh.set_name("temporary_stream_handler")  # Set a name to find it later
-        logger.addHandler(sh)
-
     return logger
+
+
+# Queue message format used throughout: (worker_id, level, text)
+#   worker_id : int   — index 0..N-1, used for [Worker N] display prefix
+#   level     : str   — "info" or "error"
+#   text      : str   — human-readable event description
 
 
 def process_file(
@@ -181,6 +144,7 @@ def process_file(
     ffmpeg_flags,
     use_ramdisk,
     debug_enable,
+    worker_id,
     logger,
     msg_queue,
 ):
@@ -189,7 +153,8 @@ def process_file(
 
     if use_ramdisk:
         tmp_path = os.path.join("/tmp", file_name)
-        logger.info(f"Copying {file_name} to /tmp/ for faster encoding...")
+        msg_queue.put((worker_id, "info", f"Copying to /tmp: {file_name}"))
+        logger.info(f"Copying {file_name} to /tmp for faster encoding.")
         shutil.copy2(input_path, tmp_path)
         working_input_path = tmp_path
 
@@ -197,7 +162,8 @@ def process_file(
     flags_list = shlex.split(ffmpeg_flags)
     cmd = [FFMPEG_PATH, "-i", working_input_path] + flags_list + [output_path]
 
-    logger.info(f"[{os.uname().nodename}] Encoding: {file_name}")
+    msg_queue.put((worker_id, "info", f"Encoding: {file_name}"))
+    logger.info(f"Encoding: {file_name}")
     if debug_enable:
         logger.info(f"[DEBUG] Command: {' '.join(cmd)}")
 
@@ -205,62 +171,47 @@ def process_file(
         result = subprocess.run(
             cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
-        logger.info(f"[{os.uname().nodename}] Finished: {file_name}")
-        msg_queue.put(("info", os.getpid(), file_name, "completed"))
+        msg_queue.put((worker_id, "info", f"Finished: {file_name}"))
+        logger.info(f"Finished: {file_name}")
         if result.stdout:
             logger.info("FFmpeg STDOUT:\n" + result.stdout)
         if result.stderr:
             logger.info("FFmpeg STDERR:\n" + result.stderr)
 
     except FileNotFoundError:
-        logger.error(f"[{os.uname().nodename}] FFmpeg not found. Is it in your PATH?")
-        msg_queue.put(("error", os.getpid(), file_name, "ffmpeg not found"))
+        msg_queue.put((worker_id, "error", "FFmpeg not found — is it in your PATH?"))
+        logger.error("FFmpeg not found — is it in your PATH?")
         return False
     except subprocess.CalledProcessError as e:
-        logger.error(
-            f"[{os.uname().nodename}] FFmpeg failed with exit code {e.returncode}"
-        )
+        msg_queue.put((worker_id, "error", f"FFmpeg failed (code {e.returncode}): {file_name}"))
+        logger.error(f"FFmpeg failed with exit code {e.returncode}: {file_name}")
         if e.stdout:
             logger.info("FFmpeg STDOUT:\n" + e.stdout)
         if e.stderr:
             logger.error("FFmpeg STDERR:\n" + e.stderr)
-        msg_queue.put(
-            ("error", os.getpid(), file_name, f"ffmpeg failed (code {e.returncode})")
-        )
         return False
 
     if use_ramdisk:
         try:
             os.remove(tmp_path)
             logger.info(f"Removed temp copy: {tmp_path}")
-        except OSError as e:
-            logger.warning(f"Warning: Could not remove temp file {tmp_path}: {e}")
+        except OSError as exc:
+            logger.warning(f"Could not remove temp file {tmp_path}: {exc}")
 
     return True
 
 
-def worker(args, detach_event, main_pid, msg_queue):
+def worker(args, detach_event, main_pid, msg_queue, worker_id):
     logger = setup_logging(main_pid=main_pid)
     retries = 0
 
-    temp_sh = None  # Get a reference to the temporary stream handler
-    for handler in logger.handlers:
-        if handler.get_name() == "temporary_stream_handler":
-            temp_sh = handler
-            break
-
-    # First log message will go to both file and stream
-    logger.info(f"Worker {os.getpid()} starting...")
-    # Remove the temporary stream handler after the first log message
-    if temp_sh:
-        logger.removeHandler(temp_sh)
+    msg_queue.put((worker_id, "info", f"Started (PID {os.getpid()})"))
 
     while not detach_event.is_set():
         files = get_media_files(args.source_dir, args.input_extensions)
         if not files:
-            # All subsequent log messages will go to the file only
             detach_event.set()
-            logger.info("No files found at all, detaching immediately.")
+            msg_queue.put((worker_id, "info", "No files found, stopping."))
             return
 
         picked_file = None
@@ -269,7 +220,6 @@ def worker(args, detach_event, main_pid, msg_queue):
         os.makedirs(os.path.join(args.output_dir, "tmp"), exist_ok=True)
 
         for f in files:
-            # --- FIX: Use the helper function for a consistent check ---
             output_tmp_path = get_output_path(args.output_dir, f, args.output_extension)
             if os.path.exists(output_tmp_path):
                 continue
@@ -284,7 +234,6 @@ def worker(args, detach_event, main_pid, msg_queue):
                 continue
 
         if picked_file:
-            # If we find a file, reset retries
             retries = 0
             try:
                 success = process_file(
@@ -295,61 +244,110 @@ def worker(args, detach_event, main_pid, msg_queue):
                     args.ffmpeg_flags,
                     args.use_ramdisk,
                     args.debug_enable,
+                    worker_id,
                     logger,
                     msg_queue,
                 )
                 if not success:
-                    msg_queue.put(("error", os.getpid(), picked_file, "failed"))
+                    msg_queue.put((worker_id, "error", f"Failed: {picked_file}"))
             finally:
-                if lock_fd:
+                if lock_fd is not None:
                     os.close(lock_fd)
                     os.remove(lock_path)
         else:
-            # If no files are available, increment retries and sleep
             retries += 1
             if retries >= args.max_retries:
-                logger.info(
-                    f"[{os.uname().nodename}] No unlocked files found after {args.max_retries} retries, signaling detach."
+                msg_queue.put(
+                    (worker_id, "info",
+                     f"No unlocked files after {args.max_retries} retries, stopping.")
                 )
                 detach_event.set()
-                return  # Exit worker as there's no work
+                return
 
             sleep_time = random.randint(1, 4)
-            logger.info(
-                f"[{os.uname().nodename}] No unlocked files, retry {retries}/{args.max_retries} in {sleep_time}s"
+            msg_queue.put(
+                (worker_id, "info",
+                 f"No unlocked files, retry {retries}/{args.max_retries} in {sleep_time}s")
             )
             time.sleep(sleep_time)
 
-    # Clean up and exit if detach_event is set
-    logger.info(f"[{os.uname().nodename}] Exiting due to detach signal.")
+    msg_queue.put((worker_id, "info", "Exiting."))
+
+
+def _display_loop(parent_conn, child_pid):
+    """
+    Read messages from the manager and print them to the terminal.
+
+    Watches stdin for keypresses when running interactively:
+      'd'    — detach (return "detach")
+      Ctrl+C — abort   (return "interrupt")
+
+    Returns "detach", "interrupt", or "done" (pipe closed / encoding finished).
+    """
+    is_tty = sys.stdin.isatty()
+    old_settings = None
+
+    if is_tty:
+        stdin_fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(stdin_fd)
+        tty.setcbreak(stdin_fd)
+
+    print(f"Encoding started (manager PID {child_pid}).", flush=True)
+    if is_tty:
+        print("Press 'd' to detach, Ctrl+C to abort.", flush=True)
+
+    poll_sources = [parent_conn]
+    if is_tty:
+        poll_sources.append(sys.stdin)
+
+    try:
+        while True:
+            try:
+                ready = select.select(poll_sources, [], [], 0.5)[0]
+            except (ValueError, OSError):
+                return "done"
+
+            for source in ready:
+                if is_tty and source is sys.stdin:
+                    key = os.read(sys.stdin.fileno(), 1)
+                    if key.lower() == b"d":
+                        return "detach"
+                elif source is parent_conn:
+                    try:
+                        worker_id, level, text = parent_conn.recv()
+                        print(f"[Worker {worker_id}] {text}", flush=True)
+                    except EOFError:
+                        return "done"
+
+    except KeyboardInterrupt:
+        return "interrupt"
+    finally:
+        if old_settings is not None:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
 
 
 def main():
-    processes = []
-    logger = None
+    args = parse_args()
+
+    # Pipe: manager (child) writes display messages; UI (parent) reads and prints them.
+    # Using duplex=False gives a unidirectional OS pipe whose read end supports select().
+    parent_conn, child_conn = multiprocessing.Pipe(duplex=False)
+
     try:
-        args = parse_args()
+        child_pid = os.fork()
+    except OSError as e:
+        print(f"Fork failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
-        # Fork once so the shell gets its prompt back immediately.
-        # The child becomes the background manager; workers are spawned as its
-        # children so the entire tree can be stopped with a single kill.
-        try:
-            child_pid = os.fork()
-        except OSError as e:
-            print(f"Fork failed: {e}", file=sys.stderr)
-            sys.exit(1)
-
-        if child_pid > 0:
-            # Original process: print the manager PID and exit.
-            print(f"Encoding manager started in background (PID {child_pid}).")
-            print(f"To stop all workers: kill {child_pid}")
-            os._exit(0)
-
-        # --- Background manager process from here on ---
+    # -------------------------------------------------------------------------
+    # MANAGER PROCESS
+    # -------------------------------------------------------------------------
+    if child_pid == 0:
+        parent_conn.close()
         os.setsid()
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
-        # Redirect stdin/stdout/stderr so stray output doesn't reach the terminal.
+        # Manager has no use for terminal I/O; redirect to avoid stray output.
         devnull_fd = os.open(os.devnull, os.O_RDWR)
         for fd in (0, 1, 2):
             try:
@@ -369,35 +367,43 @@ def main():
             logger.info(f"[DEBUG] FFmpeg flags: {args.ffmpeg_flags}")
             logger.info(f"[DEBUG] Use Ramdisk: {args.use_ramdisk}")
 
-        for _ in range(args.num_workers):
+        processes = []
+        for i in range(args.num_workers):
             p = multiprocessing.Process(
                 target=worker,
-                args=(args, detach_event, main_pid, msg_queue),
+                args=(args, detach_event, main_pid, msg_queue, i),
             )
             p.start()
             processes.append(p)
 
-        # Drain the message queue until all workers have exited.
+        # Relay messages from workers to the UI pipe and the log file.
+        # If the UI process has detached (pipe broken), keep logging to file only.
+        pipe_alive = True
+
+        def relay(wid, level, text):
+            nonlocal pipe_alive
+            if level == "error":
+                logger.error(f"[Worker {wid}] {text}")
+            else:
+                logger.info(f"[Worker {wid}] {text}")
+            if pipe_alive:
+                try:
+                    child_conn.send((wid, level, text))
+                except (BrokenPipeError, OSError):
+                    pipe_alive = False
+
         while any(p.is_alive() for p in processes):
             try:
-                level, worker_pid, file_name, text = msg_queue.get(timeout=1)
-                msg = f"Worker {worker_pid} {text} on {file_name}"
-                if level == "error":
-                    logger.error(msg)
-                else:
-                    logger.info(msg)
+                wid, level, text = msg_queue.get(timeout=1)
+                relay(wid, level, text)
             except queue.Empty:
                 continue
 
-        # Drain any messages that arrived after the last liveness check.
+        # Drain any messages queued after the last liveness check.
         while True:
             try:
-                level, worker_pid, file_name, text = msg_queue.get_nowait()
-                msg = f"Worker {worker_pid} {text} on {file_name}"
-                if level == "error":
-                    logger.error(msg)
-                else:
-                    logger.info(msg)
+                wid, level, text = msg_queue.get_nowait()
+                relay(wid, level, text)
             except queue.Empty:
                 break
 
@@ -405,13 +411,34 @@ def main():
             p.join()
 
         logger.info("All workers finished.")
+        try:
+            child_conn.close()
+        except OSError:
+            pass
+        os._exit(0)
 
-    except KeyboardInterrupt:
-        if logger:
-            logger.info("Keyboard interrupt caught: exiting...")
-        for p in processes:
-            p.terminate()
-        sys.exit(0)
+    # -------------------------------------------------------------------------
+    # UI PROCESS
+    # -------------------------------------------------------------------------
+    else:
+        child_conn.close()
+
+        result = _display_loop(parent_conn, child_pid)
+        parent_conn.close()
+
+        if result == "detach":
+            print(f"\nDetached. Manager continues in background (PID {child_pid}).")
+            print(f"To stop all workers: kill {child_pid}")
+        elif result == "interrupt":
+            print("\nInterrupted. Stopping all workers...")
+            try:
+                os.killpg(child_pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        elif result == "done":
+            print("\nAll encoding complete.")
+
+        os._exit(0)
 
 
 if __name__ == "__main__":

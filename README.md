@@ -4,21 +4,29 @@ A parallel, distributed video encoding pipeline built on top of FFmpeg. Designed
 
 ## How It Works
 
-At startup, the script spawns **5 worker processes** that race to claim and encode files from a source directory. Claiming is done by atomically creating a `.lock` file (using `O_CREAT | O_EXCL` — a Linux syscall that fails if the file already exists) in the output `tmp/` directory. This guarantees that no two workers — whether on the same machine or different ones — will encode the same file at the same time.
+At startup, the script forks into two processes:
 
-Workers shuffle the file list before iterating, which distributes load more evenly when running multiple instances of the script across machines. Once encoding is complete, the lock file is deleted and the finished output is left in `output_dir/tmp/`.
+- The **UI process** (the one your shell launched) stays in the foreground. It displays live encoding events in the terminal, prefixed with `[Worker N]` so you always know which worker is responsible. It also watches for keyboard input.
+- The **manager process** (the forked child) calls `setsid()` to detach from the controlling terminal, then spawns all worker processes as its own children and waits for them to finish.
 
-At startup, the script immediately forks a **background manager process** and exits the original process, returning your shell prompt right away. The manager spawns all workers as its own children and waits for them to finish. Because workers remain children of the manager, the entire encoding job can be stopped at once with `kill <manager_pid>` — no need to hunt down individual worker PIDs.
+Workers race to claim files by atomically creating a `.lock` file (using `O_CREAT | O_EXCL` — a Linux syscall that fails if the file already exists) in the output `tmp/` directory. This guarantees that no two workers — whether on the same machine or different ones — will encode the same file at the same time.
+
+Workers shuffle the file list before iterating, which distributes load more evenly when running multiple instances across machines. Once encoding is complete, the lock file is deleted and the finished output is left in `output_dir/tmp/`.
+
+### Detaching
+
+While the script is running, press **`d`** to detach. The UI process exits (returning your shell prompt), while the manager and all workers continue running in the background. Because workers are always children of the manager, the entire encoding job can be stopped at any time with a single `kill <manager_pid>`.
 
 ## Features
 
 - **Parallel encoding** — 5 concurrent FFmpeg worker processes by default
 - **Distributed-safe locking** — filesystem lock files work across NFS/SMB mounts
+- **Live terminal output** — encoding events streamed to the terminal with `[Worker N]` identifiers while running in the foreground
+- **Press `d` to detach** — hands off to the background manager at any time, freeing the shell without interrupting encoding
 - **Ramdisk support** — optionally copies source files to `/tmp` before encoding for faster I/O
 - **Flexible format support** — configurable input extensions; defaults to a wide range of common video and audio containers
 - **Configurable output** — pass any FFmpeg flags directly; output container is configurable
-- **Per-process logging** — each worker writes its own log file; the main process writes a separate one
-- **Graceful detachment** — a background manager process is forked at startup, returning the shell prompt immediately while encoding continues
+- **Per-process logging** — each worker writes its own log file; the manager writes a separate one
 - **Retry logic** — workers retry up to 10 times with randomized backoff before giving up
 
 ## Requirements
@@ -47,7 +55,7 @@ python Television_Mass_Encoder.py \
 | `--output-extension` | No | Output container extension (default: `.mkv`) |
 | `--input-extensions` | No | Colon-separated list of extensions to process, e.g. `mp4:mkv:avi` (default: common video/audio formats) |
 | `--use-ramdisk` | No | Copy each source file to `/tmp` before encoding for potentially faster reads |
-| `--debug_enable` | No | Print extra debug information to the log |
+| `--debug_enable` | No | Write the full FFmpeg command to the log for each file |
 | `--num-workers` | No | Number of parallel worker processes (default: 5) |
 | `--max-retries` | No | Max retry attempts per worker before giving up (default: 10) |
 
@@ -74,6 +82,31 @@ python Television_Mass_Encoder.py --source-dir /mnt/nas/shows --output-dir /mnt/
 python Television_Mass_Encoder.py --source-dir /mnt/nas/shows --output-dir /mnt/nas/encoded --ffmpeg-flags "..."
 ```
 
+## Terminal Output
+
+While running in the foreground, events are printed as they happen:
+
+```
+Encoding started (manager PID 12346). Press 'd' to detach, Ctrl+C to abort.
+[Worker 0] Started (PID 12347)
+[Worker 1] Started (PID 12348)
+[Worker 0] Encoding: Show.S01E01.mkv
+[Worker 1] Encoding: Show.S01E02.mkv
+[Worker 0] Finished: Show.S01E01.mkv
+[Worker 0] Encoding: Show.S01E03.mkv
+...
+```
+
+Press **`d`** at any time to detach:
+
+```
+Detached. Manager continues in background (PID 12346).
+To stop all workers: kill 12346
+$
+```
+
+Press **`Ctrl+C`** to stop all workers immediately and exit.
+
 ## Output Structure
 
 ```
@@ -89,14 +122,14 @@ Encoded files are placed in `output-dir/tmp/`. You can move or rename them once 
 
 ## Logging
 
-The main process writes a log named `main_<pid>.log` in the current working directory. Each worker writes its log to a subdirectory named `<main_pid>_worker_logs/`.
+The manager writes a log named `main_<pid>.log` in the current working directory. Each worker writes its log to a subdirectory named `<manager_pid>_worker_logs/`. Worker logs include the full FFmpeg stdout/stderr for each file.
 
 ```
 ./
-├── main_12345.log
-└── 12345_worker_logs/
-    ├── transcode_12345_12346.log
-    ├── transcode_12345_12347.log
+├── main_12346.log
+└── 12346_worker_logs/
+    ├── transcode_12346_12347.log
+    ├── transcode_12346_12348.log
     └── ...
 ```
 
@@ -104,8 +137,8 @@ The main process writes a log named `main_<pid>.log` in the current working dire
 
 - The script is opinionated about output going into a `tmp/` subdirectory of `--output-dir`. Post-processing (moving files to a final destination, renaming, etc.) is left to the user.
 - The number of worker processes and max retry count default to 5 and 10 respectively, and can be overridden with `--num-workers` and `--max-retries`.
-- The manager PID is printed to the terminal at startup and recorded in `main_<pid>.log`. Use `kill <manager_pid>` to stop the manager and all workers together.
-- Pressing `Ctrl+C` in the brief window before the fork completes will exit cleanly.
+- The manager PID is printed at startup. Use `kill <manager_pid>` to stop the manager and all workers together; because workers share the manager's process group, a single `kill` is sufficient.
+- If stdin is not a terminal (e.g. piped input or a non-interactive context), the `d` key and `Ctrl+C` handling are skipped and the UI process simply mirrors output until encoding is complete.
 
 ## License
 
