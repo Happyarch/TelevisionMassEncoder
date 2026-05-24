@@ -36,10 +36,45 @@ While the script is running, press **`d`** to detach. The UI process exits (retu
 
 No third-party Python packages are required — only the standard library.
 
+## Installation
+
+```bash
+git clone https://github.com/Happyarch/TelevisionMassEncoder.git
+cd TelevisionMassEncoder
+sudo make install
+```
+
+This installs `dtme` to `/usr/local/bin`. The `check` step will warn you if `ffmpeg` is missing.
+
+**Custom install prefix** (e.g. user-local, no `sudo` needed):
+
+```bash
+make install PREFIX=~/.local
+```
+
+Ensure `~/.local/bin` is in your `PATH`.
+
+**Uninstall:**
+
+```bash
+sudo make uninstall
+# or, if installed to a custom prefix:
+make uninstall PREFIX=~/.local
+```
+
 ## Usage
 
 ```bash
-python Television_Mass_Encoder.py \
+dtme \
+  --source-dir /path/to/source/videos \
+  --output-dir /path/to/output \
+  --ffmpeg-flags "-c:v libsvtav1 -crf 28 -preset 6 -c:a libopus -b:a 192k"
+```
+
+Or run directly without installing:
+
+```bash
+python3 Television_Mass_Encoder.py \
   --source-dir /path/to/source/videos \
   --output-dir /path/to/output \
   --ffmpeg-flags "-c:v libsvtav1 -crf 28 -preset 6 -c:a libopus -b:a 192k"
@@ -62,7 +97,7 @@ python Television_Mass_Encoder.py \
 ### Example: AV1 encoding with Opus audio
 
 ```bash
-python Television_Mass_Encoder.py \
+dtme \
   --source-dir /mnt/nas/shows \
   --output-dir /mnt/nas/encoded \
   --ffmpeg-flags "-c:v libsvtav1 -crf 30 -preset 5 -g 240 -c:a libopus -b:a 128k" \
@@ -76,10 +111,10 @@ Start the script with identical arguments on both machines. The `.lock` file mec
 
 ```bash
 # Machine A
-python Television_Mass_Encoder.py --source-dir /mnt/nas/shows --output-dir /mnt/nas/encoded --ffmpeg-flags "..."
+dtme --source-dir /mnt/nas/shows --output-dir /mnt/nas/encoded --ffmpeg-flags "..."
 
 # Machine B (same command simultaneously)
-python Television_Mass_Encoder.py --source-dir /mnt/nas/shows --output-dir /mnt/nas/encoded --ffmpeg-flags "..."
+dtme --source-dir /mnt/nas/shows --output-dir /mnt/nas/encoded --ffmpeg-flags "..."
 ```
 
 ## Terminal Output
