@@ -20,7 +20,8 @@
 # Output container extension. A leading dot is optional.
 # output_extension = .mkv
 
-# Colon-separated list of input file extensions to scan for (no leading dots).
+# Colon-separated list of input file extensions to scan for.
+# Leading dots are optional: mkv:mp4:avi and .mkv:.mp4:.avi are both accepted.
 # input_extensions = mkv:mp4:avi:mov:webm
 
 # Number of parallel encoding worker processes.

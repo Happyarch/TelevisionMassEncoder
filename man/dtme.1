@@ -99,9 +99,12 @@ Default:
 .IR .mkv .
 .TP
 .BI \-\-input\-extensions " list"
-Colon-separated list of file extensions to scan for, without leading dots.
-Example:
-.IR mkv:mp4:avi .
+Colon-separated list of file extensions to scan for.
+A leading dot is optional for each entry;
+.I mkv:mp4:avi
+and
+.I .mkv:.mp4:.avi
+are both accepted.
 Defaults to the following formats:
 .IR mkv ,
 .IR mp4 ,

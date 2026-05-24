@@ -101,8 +101,9 @@ def parse_args():
         "--input-extensions",
         type=str,
         help=(
-            "Colon-separated list of file extensions to process (without leading dots). "
-            "Example: mp4:mkv:avi. Defaults to all common FFmpeg-supported video/audio formats."
+            "Colon-separated list of file extensions to process. "
+            "Leading dots are optional: mp4:mkv:avi and .mp4:.mkv:.avi are both accepted. "
+            "Defaults to all common FFmpeg-supported video/audio formats."
         ),
     )
     parser.add_argument(

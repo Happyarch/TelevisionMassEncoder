@@ -117,7 +117,7 @@ python3 Television_Mass_Encoder.py \
 | `--ffmpeg-flags` | Yes* | FFmpeg encoding flags as a single quoted string, passed directly to FFmpeg |
 | `--ffmpeg-binary` | No | Path to the ffmpeg executable (default: `ffmpeg`) |
 | `--output-extension` | No | Output container extension (default: `.mkv`) |
-| `--input-extensions` | No | Colon-separated list of extensions to process, e.g. `mp4:mkv:avi` (default: common video/audio formats) |
+| `--input-extensions` | No | Colon-separated list of extensions to process, e.g. `mp4:mkv:avi` or `.mp4:.mkv:.avi` — leading dot is optional (default: common video/audio formats) |
 | `--use-ramdisk` | No | Copy each source file to `/tmp` before encoding for potentially faster reads |
 | `--debug_enable` | No | Write the full FFmpeg command to the log for each file |
 | `--num-workers` | No | Number of parallel worker processes (default: 5) |
