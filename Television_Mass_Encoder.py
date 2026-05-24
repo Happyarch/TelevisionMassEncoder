@@ -71,33 +71,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def detach():
-    """Detach from shell but keep stdout/stderr, ignoring SIGHUP."""
-    # Ignore hangup signal (shell closing)
-    try:
-        os.setsid()
-    except Exception:
-        pass  # Not critical if already in a session
-
-    # Double-fork to prevent a defunct process (zombie)
-    try:
-        if os.fork() > 0:
-            os._exit(0)  # Exit the first child
-    except OSError as e:
-        print(f"Failed to double-fork: {e}")
-        os._exit(1)
-
-    # Close standard file descriptors to completely detach
-    try:
-        os.close(0)
-        os.close(1)
-        os.close(2)
-    except OSError:
-        pass  # Ignore if they're already closed
-
-    # Ignore hangup signal again after setsid() and fork()
-    signal.signal(signal.SIGHUP, signal.SIG_IGN)
-
 
 def get_media_files(source_dir, input_exts=None):
     """
@@ -200,7 +173,6 @@ def setup_logging(main_pid=None, is_main=False):
     return logger
 
 
-# --- REFACTORED: Changed ram_disk parameter to use_ramdisk ---
 def process_file(
     file_name,
     source_dir,
@@ -211,10 +183,9 @@ def process_file(
     debug_enable,
     logger,
     msg_queue,
-    detach_event,  # Added detach_event parameter
 ):
     input_path = os.path.join(source_dir, file_name)
-    working_input_path = input_path  # default
+    working_input_path = input_path
 
     if use_ramdisk:
         tmp_path = os.path.join("/tmp", file_name)
@@ -223,21 +194,8 @@ def process_file(
         working_input_path = tmp_path
 
     output_path = get_output_path(output_dir, file_name, output_extension)
-
-    # ffmpeg_flags is a single string, so split it safely into list
     flags_list = shlex.split(ffmpeg_flags)
-
     cmd = [FFMPEG_PATH, "-i", working_input_path] + flags_list + [output_path]
-
-    # --- Conditional output based on detach_event ---
-    if detach_event.is_set():
-        # Once detached, capture output for logging
-        stdout_dest = subprocess.PIPE
-        stderr_dest = subprocess.PIPE
-    else:
-        # Before detachment, send output directly to the terminal
-        stdout_dest = None
-        stderr_dest = None
 
     logger.info(f"[{os.uname().nodename}] Encoding: {file_name}")
     if debug_enable:
@@ -245,16 +203,14 @@ def process_file(
 
     try:
         result = subprocess.run(
-            cmd, check=True, stdout=stdout_dest, stderr=stderr_dest, text=True
+            cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         logger.info(f"[{os.uname().nodename}] Finished: {file_name}")
         msg_queue.put(("info", os.getpid(), file_name, "completed"))
-
-        if detach_event.is_set():
-            if result.stdout:
-                logger.info("FFmpeg STDOUT:\n" + result.stdout)
-            if result.stderr:
-                logger.error("FFmpeg STDERR:\n" + result.stderr)
+        if result.stdout:
+            logger.info("FFmpeg STDOUT:\n" + result.stdout)
+        if result.stderr:
+            logger.info("FFmpeg STDERR:\n" + result.stderr)
 
     except FileNotFoundError:
         logger.error(f"[{os.uname().nodename}] FFmpeg not found. Is it in your PATH?")
@@ -264,12 +220,10 @@ def process_file(
         logger.error(
             f"[{os.uname().nodename}] FFmpeg failed with exit code {e.returncode}"
         )
-        if detach_event.is_set():
-            if e.stdout:
-                logger.info("FFmpeg STDOUT:\n" + e.stdout)
-            if e.stderr:
-                logger.error("FFmpeg STDERR:\n" + e.stderr)
-
+        if e.stdout:
+            logger.info("FFmpeg STDOUT:\n" + e.stdout)
+        if e.stderr:
+            logger.error("FFmpeg STDERR:\n" + e.stderr)
         msg_queue.put(
             ("error", os.getpid(), file_name, f"ffmpeg failed (code {e.returncode})")
         )
@@ -343,7 +297,6 @@ def worker(args, detach_event, main_pid, msg_queue):
                     args.debug_enable,
                     logger,
                     msg_queue,
-                    detach_event,  # Corrected: Pass detach_event here
                 )
                 if not success:
                     msg_queue.put(("error", os.getpid(), picked_file, "failed"))
@@ -372,8 +325,39 @@ def worker(args, detach_event, main_pid, msg_queue):
 
 
 def main():
+    processes = []
+    logger = None
     try:
         args = parse_args()
+
+        # Fork once so the shell gets its prompt back immediately.
+        # The child becomes the background manager; workers are spawned as its
+        # children so the entire tree can be stopped with a single kill.
+        try:
+            child_pid = os.fork()
+        except OSError as e:
+            print(f"Fork failed: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        if child_pid > 0:
+            # Original process: print the manager PID and exit.
+            print(f"Encoding manager started in background (PID {child_pid}).")
+            print(f"To stop all workers: kill {child_pid}")
+            os._exit(0)
+
+        # --- Background manager process from here on ---
+        os.setsid()
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+        # Redirect stdin/stdout/stderr so stray output doesn't reach the terminal.
+        devnull_fd = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            try:
+                os.dup2(devnull_fd, fd)
+            except OSError:
+                pass
+        os.close(devnull_fd)
+
         main_pid = os.getpid()
         logger = setup_logging(is_main=True)
         detach_event = multiprocessing.Event()
@@ -385,7 +369,6 @@ def main():
             logger.info(f"[DEBUG] FFmpeg flags: {args.ffmpeg_flags}")
             logger.info(f"[DEBUG] Use Ramdisk: {args.use_ramdisk}")
 
-        processes = []
         for _ in range(args.num_workers):
             p = multiprocessing.Process(
                 target=worker,
@@ -394,7 +377,8 @@ def main():
             p.start()
             processes.append(p)
 
-        while not detach_event.is_set():
+        # Drain the message queue until all workers have exited.
+        while any(p.is_alive() for p in processes):
             try:
                 level, worker_pid, file_name, text = msg_queue.get(timeout=1)
                 msg = f"Worker {worker_pid} {text} on {file_name}"
@@ -405,23 +389,29 @@ def main():
             except queue.Empty:
                 continue
 
-        # --- FIX: Remove the stream handler before detaching ---
-        main_logger = logging.getLogger(f"transcoder_{main_pid}")
-        for handler in main_logger.handlers:
-            if isinstance(handler, logging.StreamHandler):
-                main_logger.removeHandler(handler)
+        # Drain any messages that arrived after the last liveness check.
+        while True:
+            try:
+                level, worker_pid, file_name, text = msg_queue.get_nowait()
+                msg = f"Worker {worker_pid} {text} on {file_name}"
+                if level == "error":
+                    logger.error(msg)
+                else:
+                    logger.info(msg)
+            except queue.Empty:
+                break
 
-        logger.info("Detaching: Workers will continue in the background.")
-        detach()
-        # The main process will now exit, leaving the workers to finish.
-        # It's important to not have any further logging or output after detach()
-        # to ensure the terminal is released.
+        for p in processes:
+            p.join()
+
+        logger.info("All workers finished.")
 
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt caught: exiting...")
+        if logger:
+            logger.info("Keyboard interrupt caught: exiting...")
         for p in processes:
             p.terminate()
-        exit()
+        sys.exit(0)
 
 
 if __name__ == "__main__":

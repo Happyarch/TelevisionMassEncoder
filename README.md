@@ -8,7 +8,7 @@ At startup, the script spawns **5 worker processes** that race to claim and enco
 
 Workers shuffle the file list before iterating, which distributes load more evenly when running multiple instances of the script across machines. Once encoding is complete, the lock file is deleted and the finished output is left in `output_dir/tmp/`.
 
-After all files have been claimed or a retry threshold is hit, the main process **detaches from the terminal** via a double-fork (a standard Unix daemonization technique), leaving the remaining workers to finish in the background without holding up your shell session.
+At startup, the script immediately forks a **background manager process** and exits the original process, returning your shell prompt right away. The manager spawns all workers as its own children and waits for them to finish. Because workers remain children of the manager, the entire encoding job can be stopped at once with `kill <manager_pid>` — no need to hunt down individual worker PIDs.
 
 ## Features
 
@@ -18,7 +18,7 @@ After all files have been claimed or a retry threshold is hit, the main process 
 - **Flexible format support** — configurable input extensions; defaults to a wide range of common video and audio containers
 - **Configurable output** — pass any FFmpeg flags directly; output container is configurable
 - **Per-process logging** — each worker writes its own log file; the main process writes a separate one
-- **Graceful detachment** — once all files are picked up, the main process daemonizes and exits the terminal cleanly
+- **Graceful detachment** — a background manager process is forked at startup, returning the shell prompt immediately while encoding continues
 - **Retry logic** — workers retry up to 10 times with randomized backoff before giving up
 
 ## Requirements
@@ -104,8 +104,8 @@ The main process writes a log named `main_<pid>.log` in the current working dire
 
 - The script is opinionated about output going into a `tmp/` subdirectory of `--output-dir`. Post-processing (moving files to a final destination, renaming, etc.) is left to the user.
 - The number of worker processes and max retry count default to 5 and 10 respectively, and can be overridden with `--num-workers` and `--max-retries`.
-- Pressing `Ctrl+C` before detachment will terminate all workers cleanly.
-- Once the main process detaches, it cannot be stopped with `Ctrl+C`. Use `kill <pid>` on the individual worker PIDs (visible in the log files) to stop them.
+- The manager PID is printed to the terminal at startup and recorded in `main_<pid>.log`. Use `kill <manager_pid>` to stop the manager and all workers together.
+- Pressing `Ctrl+C` in the brief window before the fork completes will exit cleanly.
 
 ## License
 
