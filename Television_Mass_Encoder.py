@@ -56,6 +56,18 @@ def parse_args():
             "Example: mp4:mkv:avi. Defaults to all common FFmpeg-supported video/audio formats."
         ),
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=NUM_WORKERS,
+        help=f"Number of parallel worker processes (default: {NUM_WORKERS})",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=MAX_RETRIES,
+        help=f"Max retry attempts per worker before giving up (default: {MAX_RETRIES})",
+    )
     return parser.parse_args()
 
 
@@ -143,6 +155,8 @@ def get_media_files(source_dir, input_exts=None):
 def get_output_path(output_dir, file_name, output_extension):
     if not output_extension:
         output_extension = ".mkv"
+    if not output_extension.startswith("."):
+        output_extension = "." + output_extension
     output_dir_tmp = os.path.join(output_dir, "tmp")
     os.makedirs(output_dir_tmp, exist_ok=True)
     return os.path.join(
@@ -194,6 +208,7 @@ def process_file(
     output_extension,
     ffmpeg_flags,
     use_ramdisk,
+    debug_enable,
     logger,
     msg_queue,
     detach_event,  # Added detach_event parameter
@@ -225,7 +240,8 @@ def process_file(
         stderr_dest = None
 
     logger.info(f"[{os.uname().nodename}] Encoding: {file_name}")
-    logger.info(f"[DEBUG] Command: {' '.join(cmd)}")  # Debug: show full command
+    if debug_enable:
+        logger.info(f"[DEBUG] Command: {' '.join(cmd)}")
 
     try:
         result = subprocess.run(
@@ -324,6 +340,7 @@ def worker(args, detach_event, main_pid, msg_queue):
                     args.output_extension,
                     args.ffmpeg_flags,
                     args.use_ramdisk,
+                    args.debug_enable,
                     logger,
                     msg_queue,
                     detach_event,  # Corrected: Pass detach_event here
@@ -337,16 +354,16 @@ def worker(args, detach_event, main_pid, msg_queue):
         else:
             # If no files are available, increment retries and sleep
             retries += 1
-            if retries >= MAX_RETRIES:
+            if retries >= args.max_retries:
                 logger.info(
-                    f"[{os.uname().nodename}] No unlocked files found after {MAX_RETRIES} retries, signaling detach."
+                    f"[{os.uname().nodename}] No unlocked files found after {args.max_retries} retries, signaling detach."
                 )
                 detach_event.set()
                 return  # Exit worker as there's no work
 
             sleep_time = random.randint(1, 4)
             logger.info(
-                f"[{os.uname().nodename}] No unlocked files, retry {retries}/{MAX_RETRIES} in {sleep_time}s"
+                f"[{os.uname().nodename}] No unlocked files, retry {retries}/{args.max_retries} in {sleep_time}s"
             )
             time.sleep(sleep_time)
 
@@ -369,7 +386,7 @@ def main():
             logger.info(f"[DEBUG] Use Ramdisk: {args.use_ramdisk}")
 
         processes = []
-        for _ in range(NUM_WORKERS):
+        for _ in range(args.num_workers):
             p = multiprocessing.Process(
                 target=worker,
                 args=(args, detach_event, main_pid, msg_queue),
