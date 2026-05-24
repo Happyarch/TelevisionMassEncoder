@@ -1,0 +1,38 @@
+# dtme configuration file
+# Copy to ~/.config/dtme.conf and uncomment/edit the values you want to change.
+#
+# All settings are optional. Command-line arguments always take precedence
+# over values set here. Values here take precedence over built-in defaults.
+#
+# Boolean values accept: true/false, yes/no, on/off, 1/0
+
+[defaults]
+
+# Path to the ffmpeg executable. Useful if ffmpeg is not in your PATH,
+# or if you want to use a specific build (e.g. a hardware-accelerated one).
+# ffmpeg_binary = ffmpeg
+
+# Default FFmpeg encoding flags. Setting this here makes --ffmpeg-flags
+# optional on the command line, useful when you always encode with the
+# same codec settings.
+# ffmpeg_flags = -c:v libsvtav1 -crf 28 -preset 6 -c:a libopus -b:a 192k
+
+# Output container extension. A leading dot is optional.
+# output_extension = .mkv
+
+# Colon-separated list of input file extensions to scan for (no leading dots).
+# input_extensions = mkv:mp4:avi:mov:webm
+
+# Number of parallel encoding worker processes.
+# num_workers = 5
+
+# Maximum retry attempts per worker when no unlocked files are found before
+# the worker signals the others to stop.
+# max_retries = 10
+
+# Copy source files to /tmp before encoding. Can improve throughput when
+# the source is on a slow or heavily contended network share.
+# use_ramdisk = false
+
+# Write the full FFmpeg command to the log file for each encoded file.
+# debug_enable = false

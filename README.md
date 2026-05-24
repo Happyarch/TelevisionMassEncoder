@@ -62,6 +62,34 @@ sudo make uninstall
 make uninstall PREFIX=~/.local
 ```
 
+## Configuration File
+
+`dtme` reads `~/.config/dtme.conf` on startup. Values there become the defaults for every run; command-line arguments always take precedence.
+
+```bash
+cp dtme.conf.example ~/.config/dtme.conf
+$EDITOR ~/.config/dtme.conf
+```
+
+Example config:
+
+```ini
+[defaults]
+ffmpeg_binary = /usr/local/bin/ffmpeg
+ffmpeg_flags = -c:v libsvtav1 -crf 28 -preset 6 -c:a libopus -b:a 192k
+output_extension = .mkv
+num_workers = 8
+use_ramdisk = true
+```
+
+With `ffmpeg_flags` set in the config, `--ffmpeg-flags` becomes optional on the command line:
+
+```bash
+dtme --source-dir /nas/shows --output-dir /nas/encoded
+```
+
+All available keys are documented with comments in `dtme.conf.example`.
+
 ## Usage
 
 ```bash
@@ -86,12 +114,14 @@ python3 Television_Mass_Encoder.py \
 |---|---|---|
 | `--source-dir` | Yes | Directory containing input video files |
 | `--output-dir` | Yes | Directory where encoded files will be written (into a `tmp/` subdirectory) |
-| `--ffmpeg-flags` | Yes | FFmpeg encoding flags as a single quoted string, passed directly to FFmpeg |
+| `--ffmpeg-flags` | Yes* | FFmpeg encoding flags as a single quoted string, passed directly to FFmpeg |
+| `--ffmpeg-binary` | No | Path to the ffmpeg executable (default: `ffmpeg`) |
 | `--output-extension` | No | Output container extension (default: `.mkv`) |
 | `--input-extensions` | No | Colon-separated list of extensions to process, e.g. `mp4:mkv:avi` (default: common video/audio formats) |
 | `--use-ramdisk` | No | Copy each source file to `/tmp` before encoding for potentially faster reads |
 | `--debug_enable` | No | Write the full FFmpeg command to the log for each file |
 | `--num-workers` | No | Number of parallel worker processes (default: 5) |
+\* Required unless `ffmpeg_flags` is set in `~/.config/dtme.conf`.
 | `--max-retries` | No | Max retry attempts per worker before giving up (default: 10) |
 
 ### Example: AV1 encoding with Opus audio

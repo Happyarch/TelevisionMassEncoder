@@ -69,11 +69,24 @@ Required.
 FFmpeg encoding flags as a single quoted string, inserted between the
 .B \-i
 input path and the output path on every FFmpeg invocation.
-Required.
+Required unless
+.B ffmpeg_flags
+is set in the configuration file.
 .RS
 Example:
 .I "\-c:v libsvtav1 \-crf 28 \-preset 6 \-c:a libopus \-b:a 192k"
 .RE
+.TP
+.BI \-\-ffmpeg\-binary " path"
+Path to the ffmpeg executable.
+Useful when ffmpeg is not in
+.B PATH
+or when a specific build is required (e.g. one with hardware-acceleration support).
+Default:
+.IR ffmpeg .
+Can also be set via
+.B ffmpeg_binary
+in the configuration file.
 .TP
 .BI \-\-output\-extension " ext"
 Output container extension.
@@ -278,6 +291,77 @@ dtme \-\-source\-dir /data/shows \-\-output\-dir /data/encoded \e
 # or launch normally and press \(aqd\(aq once workers are confirmed running
 .fi
 .RE
+.
+.SH CONFIG FILE
+.B dtme
+reads
+.I ~/.config/dtme.conf
+on startup if it exists.
+Values in the file become defaults for every run; command-line arguments
+always take precedence.
+The file uses INI format with a single
+.B [defaults]
+section.
+Boolean values accept
+.BR true / false ,
+.BR yes / no ,
+.BR on / off ,
+or
+.BR 1 / 0 .
+.PP
+Available keys:
+.TP
+.B ffmpeg_binary
+Path to the ffmpeg executable.
+Equivalent to
+.BR \-\-ffmpeg\-binary .
+.TP
+.B ffmpeg_flags
+Default FFmpeg encoding flags.
+Setting this makes
+.B \-\-ffmpeg\-flags
+optional on the command line.
+.TP
+.B output_extension
+Default output container extension.
+.TP
+.B input_extensions
+Default colon-separated list of input extensions to scan for.
+.TP
+.B num_workers
+Default number of parallel worker processes.
+.TP
+.B max_retries
+Default maximum retry count per worker.
+.TP
+.B use_ramdisk
+Set to
+.B true
+to copy source files to
+.I /tmp
+before encoding by default.
+.TP
+.B debug_enable
+Set to
+.B true
+to enable debug logging by default.
+.PP
+Example configuration:
+.PP
+.RS
+.nf
+[defaults]
+ffmpeg_binary = /usr/local/bin/ffmpeg
+ffmpeg_flags = \-c:v libsvtav1 \-crf 28 \-preset 6 \-c:a libopus \-b:a 192k
+output_extension = .mkv
+num_workers = 8
+use_ramdisk = true
+.fi
+.RE
+.PP
+A fully commented example file is distributed as
+.I dtme.conf.example
+alongside the source.
 .
 .SH NOTES
 Output is always placed in a

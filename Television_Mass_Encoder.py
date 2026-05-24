@@ -14,11 +14,50 @@ import logging
 import select
 import termios
 import tty
+import configparser
 
 
-FFMPEG_PATH = "ffmpeg"
 MAX_RETRIES = 10
 NUM_WORKERS = 5
+CONFIG_PATH = os.path.expanduser("~/.config/dtme.conf")
+
+
+def load_config():
+    """
+    Parse ~/.config/dtme.conf and return a dict of overrides ready for
+    parser.set_defaults().  Unknown keys and malformed values are silently
+    skipped with a warning so a bad config never prevents the tool from running.
+    """
+    config = configparser.RawConfigParser()
+    if not config.read(CONFIG_PATH):
+        return {}
+    if "defaults" not in config:
+        return {}
+
+    section = config["defaults"]
+    overrides = {}
+
+    for key in ("ffmpeg_binary", "ffmpeg_flags", "output_extension", "input_extensions"):
+        if key in section:
+            overrides[key] = section[key].strip()
+
+    for key in ("num_workers", "max_retries"):
+        if key in section:
+            try:
+                overrides[key] = section.getint(key)
+            except ValueError:
+                print(f"dtme: config warning: '{key}' is not a valid integer, ignoring",
+                      file=sys.stderr)
+
+    for key in ("use_ramdisk", "debug_enable"):
+        if key in section:
+            try:
+                overrides[key] = section.getboolean(key)
+            except ValueError:
+                print(f"dtme: config warning: '{key}' is not a valid boolean, ignoring",
+                      file=sys.stderr)
+
+    return overrides
 
 
 def parse_args():
@@ -32,7 +71,16 @@ def parse_args():
         "--output-dir", type=str, required=True, help="Path to output videos directory"
     )
     parser.add_argument(
-        "--ffmpeg-flags", type=str, required=True, help="Flags to pass to ffmpeg"
+        "--ffmpeg-flags",
+        type=str,
+        default=None,
+        help="Flags to pass to ffmpeg (required if not set in config file)",
+    )
+    parser.add_argument(
+        "--ffmpeg-binary",
+        type=str,
+        default="ffmpeg",
+        help="Path to the ffmpeg executable (default: ffmpeg)",
     )
     parser.add_argument(
         "--debug_enable",
@@ -69,7 +117,17 @@ def parse_args():
         default=MAX_RETRIES,
         help=f"Max retry attempts per worker before giving up (default: {MAX_RETRIES})",
     )
-    return parser.parse_args()
+
+    # Config file values become defaults; CLI args override them.
+    parser.set_defaults(**load_config())
+    args = parser.parse_args()
+
+    if not args.ffmpeg_flags:
+        parser.error(
+            "--ffmpeg-flags is required (or set ffmpeg_flags in ~/.config/dtme.conf)"
+        )
+
+    return args
 
 
 def get_media_files(source_dir, input_exts=None):
@@ -142,6 +200,7 @@ def process_file(
     source_dir,
     output_dir,
     output_extension,
+    ffmpeg_binary,
     ffmpeg_flags,
     use_ramdisk,
     debug_enable,
@@ -161,7 +220,7 @@ def process_file(
 
     output_path = get_output_path(output_dir, file_name, output_extension)
     flags_list = shlex.split(ffmpeg_flags)
-    cmd = [FFMPEG_PATH, "-i", working_input_path] + flags_list + [output_path]
+    cmd = [ffmpeg_binary, "-i", working_input_path] + flags_list + [output_path]
 
     msg_queue.put((worker_id, "info", f"Encoding: {file_name}"))
     logger.info(f"Encoding: {file_name}")
@@ -180,8 +239,8 @@ def process_file(
             logger.info("FFmpeg STDERR:\n" + result.stderr)
 
     except FileNotFoundError:
-        msg_queue.put((worker_id, "error", "FFmpeg not found — is it in your PATH?"))
-        logger.error("FFmpeg not found — is it in your PATH?")
+        msg_queue.put((worker_id, "error", f"FFmpeg binary not found: {ffmpeg_binary!r}"))
+        logger.error(f"FFmpeg binary not found: {ffmpeg_binary!r}")
         return False
     except subprocess.CalledProcessError as e:
         msg_queue.put((worker_id, "error", f"FFmpeg failed (code {e.returncode}): {file_name}"))
@@ -242,6 +301,7 @@ def worker(args, detach_event, main_pid, msg_queue, worker_id):
                     args.source_dir,
                     args.output_dir,
                     args.output_extension,
+                    args.ffmpeg_binary,
                     args.ffmpeg_flags,
                     args.use_ramdisk,
                     args.debug_enable,
@@ -363,8 +423,10 @@ def main():
         msg_queue = multiprocessing.Queue()
 
         if args.debug_enable:
+            logger.info(f"[DEBUG] Config file: {CONFIG_PATH if os.path.exists(CONFIG_PATH) else 'not found'}")
             logger.info(f"[DEBUG] Source dir: {args.source_dir}")
             logger.info(f"[DEBUG] Output dir: {args.output_dir}")
+            logger.info(f"[DEBUG] FFmpeg binary: {args.ffmpeg_binary}")
             logger.info(f"[DEBUG] FFmpeg flags: {args.ffmpeg_flags}")
             logger.info(f"[DEBUG] Use Ramdisk: {args.use_ramdisk}")
 
