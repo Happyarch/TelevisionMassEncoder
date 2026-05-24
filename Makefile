@@ -1,16 +1,21 @@
 PREFIX  ?= /usr/local
 BINDIR  := $(DESTDIR)$(PREFIX)/bin
+MANDIR  := $(DESTDIR)$(PREFIX)/share/man/man1
 SCRIPT  := Television_Mass_Encoder.py
 CMD     := dtme
+MANPAGE := man/dtme.1
 
 .PHONY: install uninstall check
 
 install: check
 	install -d $(BINDIR)
 	install -m 755 $(SCRIPT) $(BINDIR)/$(CMD)
+	install -d $(MANDIR)
+	install -m 644 $(MANPAGE) $(MANDIR)/$(CMD).1
 
 uninstall:
 	rm -f $(BINDIR)/$(CMD)
+	rm -f $(MANDIR)/$(CMD).1
 
 check:
 	@command -v python3 >/dev/null 2>&1 || \

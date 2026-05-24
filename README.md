@@ -44,7 +44,7 @@ cd TelevisionMassEncoder
 sudo make install
 ```
 
-This installs `dtme` to `/usr/local/bin`. The `check` step will warn you if `ffmpeg` is missing.
+This installs `dtme` to `/usr/local/bin` and the man page to `/usr/local/share/man/man1/`. The `check` step will warn you if `ffmpeg` is missing.
 
 **Custom install prefix** (e.g. user-local, no `sudo` needed):
 

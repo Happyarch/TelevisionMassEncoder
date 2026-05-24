@@ -1,0 +1,301 @@
+.TH DTME 1 "May 2026" "dtme" "User Commands"
+.
+.SH NAME
+dtme \- distributed television mass encoder
+.
+.SH SYNOPSIS
+.B dtme
+.B \-\-source\-dir
+.I dir
+.B \-\-output\-dir
+.I dir
+.B \-\-ffmpeg\-flags
+.I flags
+.RI [ options ]
+.
+.SH DESCRIPTION
+.B dtme
+is a parallel, distributed video encoding pipeline built on top of FFmpeg.
+It is designed for mass-encoding large libraries of television or other video
+content, coordinating multiple worker processes using filesystem-level locking
+so that it can safely run across multiple machines sharing a common network
+drive simultaneously.
+.PP
+At startup,
+.B dtme
+forks into two processes.
+The
+.I UI process
+(the one the shell launched) stays in the foreground, streaming encoding
+events to the terminal with
+.B [Worker\~N]
+prefixes so the user always knows which worker is responsible for which file.
+The
+.I manager process
+(the forked child) calls
+.BR setsid (2)
+to detach from the controlling terminal, then spawns all worker processes as
+its own children and waits for them to finish.
+.PP
+Workers race to claim files by atomically creating a
+.I .lock
+file in the output
+.I tmp/
+directory using
+.B O_CREAT|O_EXCL
+\(em a syscall that fails if the file already exists.
+This guarantees that no two workers \(em whether on the same machine or
+different ones \(em will encode the same file at the same time.
+.PP
+Workers shuffle the file list before each pass, which distributes load more
+evenly when running multiple instances across machines.
+Once encoding is complete the lock file is deleted and the finished output
+is left in
+.IR output\-dir /tmp/.
+.
+.SH OPTIONS
+.TP
+.BI \-\-source\-dir " dir"
+Directory containing the input video files.
+Required.
+.TP
+.BI \-\-output\-dir " dir"
+Directory where encoded files will be written, into a
+.I tmp/
+subdirectory.
+Required.
+.TP
+.BI \-\-ffmpeg\-flags " flags"
+FFmpeg encoding flags as a single quoted string, inserted between the
+.B \-i
+input path and the output path on every FFmpeg invocation.
+Required.
+.RS
+Example:
+.I "\-c:v libsvtav1 \-crf 28 \-preset 6 \-c:a libopus \-b:a 192k"
+.RE
+.TP
+.BI \-\-output\-extension " ext"
+Output container extension.
+A leading dot is optional;
+.I mkv
+and
+.I .mkv
+are both accepted.
+Default:
+.IR .mkv .
+.TP
+.BI \-\-input\-extensions " list"
+Colon-separated list of file extensions to scan for, without leading dots.
+Example:
+.IR mkv:mp4:avi .
+Defaults to the following formats:
+.IR mkv ,
+.IR mp4 ,
+.IR mov ,
+.IR avi ,
+.IR webm ,
+.IR divx ,
+.IR vob ,
+.IR evo ,
+.IR ogv ,
+.IR ogx ,
+.IR flv ,
+.IR f4v ,
+.IR aac ,
+.IR flac ,
+.IR mp3 ,
+.IR ogg ,
+.IR opus ,
+.IR alac ,
+.IR mka ,
+.IR pcm ,
+.IR aiff ,
+.IR wav ,
+.IR cda ,
+.IR ape .
+.TP
+.BI \-\-num\-workers " n"
+Number of parallel worker processes to spawn.
+Default:
+.IR 5 .
+.TP
+.BI \-\-max\-retries " n"
+Maximum number of times a worker will retry finding an unlocked file before
+signalling all other workers to stop.
+Default:
+.IR 10 .
+.TP
+.B \-\-use\-ramdisk
+Copy each source file to
+.I /tmp
+before encoding.
+This can improve read throughput when the source resides on a slow or
+heavily contended network share.
+The temporary copy is removed after encoding completes.
+.TP
+.B \-\-debug_enable
+Write the full FFmpeg command to the worker log file for each encoded file.
+.
+.SH KEYBOARD CONTROLS
+The following keys are recognised while
+.B dtme
+is running in the foreground and stdin is an interactive terminal.
+.TP
+.B d
+Detach.
+The UI process exits, returning the shell prompt immediately.
+The manager process and all workers continue running in the background
+without interruption.
+.TP
+.B Ctrl\-C
+Abort.
+Sends
+.B SIGTERM
+to the manager's process group, which stops the manager, all workers, and
+any
+.BR ffmpeg (1)
+subprocesses they have running.
+.
+.SH OUTPUT
+Encoded files are written to
+.IR output\-dir /tmp/.
+Post-processing such as moving files to a final destination or renaming is
+left to the user.
+.PP
+While running in the foreground, events are printed as they occur:
+.PP
+.RS
+.nf
+Encoding started (manager PID 12346). Press \(aqd\(aq to detach, Ctrl\-C to abort.
+[Worker 0] Started (PID 12347)
+[Worker 1] Started (PID 12348)
+[Worker 0] Encoding: Show.S01E01.mkv
+[Worker 1] Encoding: Show.S01E02.mkv
+[Worker 0] Finished: Show.S01E01.mkv
+[Worker 0] Encoding: Show.S01E03.mkv
+\&...
+.fi
+.RE
+.PP
+A
+.I .lock
+file is present beside the output file for the duration of encoding and is
+removed on completion.
+A lock file that persists after all
+.B dtme
+instances have exited indicates an interrupted encode and the file will be
+retried on the next run.
+.
+.SH LOGGING
+The manager writes a log named
+.BI main_ pid .log
+in the working directory from which
+.B dtme
+was invoked.
+Each worker writes its own log to
+.IB manager_pid _worker_logs/transcode_ manager_pid _ worker_pid .log
+in the same directory.
+Worker logs include the full FFmpeg stdout and stderr output for each file.
+.PP
+If
+.B dtme
+is detached, the manager log remains the authoritative record of progress.
+.
+.SH STOPPING
+After detaching, the encoding job can be stopped by sending
+.B SIGTERM
+to the manager's process group:
+.PP
+.RS
+.nf
+kill <manager_pid>
+.fi
+.RE
+.PP
+Because all workers share the manager's process group (established via
+.BR setsid (2)),
+a single
+.BR kill (1)
+is sufficient to terminate the manager, all workers, and any
+.BR ffmpeg (1)
+child processes.
+The manager PID is printed at startup and is also recorded at the top of
+.BI main_ pid .log.
+.
+.SH DISTRIBUTED USE
+.B dtme
+can be run with identical arguments on multiple machines simultaneously,
+as long as all machines have read/write access to the same
+.IR \-\-output\-dir .
+The
+.B O_CREAT|O_EXCL
+locking mechanism works correctly across NFS and SMB mounts.
+Each machine's workers will independently race to claim unclaimed files;
+no coordination beyond a shared filesystem is required.
+.
+.SH EXAMPLES
+Encode a library of TV episodes to AV1 with Opus audio:
+.PP
+.RS
+.nf
+dtme \e
+  \-\-source\-dir /mnt/nas/shows \e
+  \-\-output\-dir /mnt/nas/encoded \e
+  \-\-ffmpeg\-flags "\-c:v libsvtav1 \-crf 30 \-preset 5 \-g 240 \e
+                   \-c:a libopus \-b:a 128k" \e
+  \-\-output\-extension .mkv \e
+  \-\-input\-extensions mkv:mp4:avi
+.fi
+.RE
+.PP
+Run on two machines simultaneously against a shared NAS:
+.PP
+.RS
+.nf
+# Machine A and Machine B \(em same command, started concurrently:
+dtme \-\-source\-dir /mnt/nas/shows \-\-output\-dir /mnt/nas/encoded \e
+     \-\-ffmpeg\-flags "\-c:v libsvtav1 \-crf 28 \-preset 6 \e
+                     \-c:a libopus \-b:a 192k"
+.fi
+.RE
+.PP
+Use 8 workers and copy source files to a ramdisk before encoding:
+.PP
+.RS
+.nf
+dtme \-\-source\-dir /mnt/nas/shows \-\-output\-dir /mnt/nas/encoded \e
+     \-\-ffmpeg\-flags "..." \-\-num\-workers 8 \-\-use\-ramdisk
+.fi
+.RE
+.PP
+Detach immediately after starting (unattended batch job):
+.PP
+.RS
+.nf
+dtme \-\-source\-dir /data/shows \-\-output\-dir /data/encoded \e
+     \-\-ffmpeg\-flags "..." &
+# or launch normally and press \(aqd\(aq once workers are confirmed running
+.fi
+.RE
+.
+.SH NOTES
+Output is always placed in a
+.I tmp/
+subdirectory of
+.IR \-\-output\-dir .
+This is intentional: an interrupted encode leaves a partial file in
+.I tmp/
+rather than in the final destination, making it easy to identify without
+accidentally treating it as a completed file.
+.PP
+If stdin is not a terminal (e.g.\& piped input or a non-interactive
+environment), keyboard controls are disabled and the UI process simply
+mirrors manager output until encoding is complete or the process is
+signalled.
+.
+.SH SEE ALSO
+.BR ffmpeg (1),
+.BR kill (1),
+.BR setsid (1),
+.BR nfs (5)
