@@ -44,22 +44,31 @@ cd TelevisionMassEncoder
 sudo make install
 ```
 
-This installs `dtme` to `/usr/local/bin` and the man page to `/usr/local/share/man/man1/`. The `check` step will warn you if `ffmpeg` is missing.
+Installs `dtme`, the man page, and shell completions (bash, zsh, fish) to system-wide paths under `/usr/local`. The `check` step will warn you if `ffmpeg` is missing.
 
-**Custom install prefix** (e.g. user-local, no `sudo` needed):
+### Install targets
+
+| Target | What it does | Requires `sudo` |
+|---|---|---|
+| `install` | Install to `/usr/local` | Yes |
+| `uninstall` | Remove from `/usr/local` | Yes |
+| `reinstall` | Uninstall then reinstall globally | Yes |
+| `install-user` | Install to `~/.local`; fish completions to `~/.config/fish/completions` | No |
+| `uninstall-user` | Remove from `~/.local` | No |
+| `reinstall-user` | Uninstall then reinstall for the current user | No |
+
+**User-local install** (no `sudo` needed):
 
 ```bash
-make install PREFIX=~/.local
+make install-user
 ```
 
 Ensure `~/.local/bin` is in your `PATH`.
 
-**Uninstall:**
+**Custom prefix** (overrides the `/usr/local` default):
 
 ```bash
-sudo make uninstall
-# or, if installed to a custom prefix:
-make uninstall PREFIX=~/.local
+sudo make install PREFIX=/opt/dtme
 ```
 
 ## Configuration File
