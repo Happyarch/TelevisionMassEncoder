@@ -1,0 +1,17 @@
+#compdef dtme
+
+_dtme() {
+    _arguments \
+        '--source-dir[Path to input videos directory]:source directory:_directories' \
+        '--output-dir[Path to output videos directory]:output directory:_directories' \
+        '--ffmpeg-flags[Flags to pass to ffmpeg]:ffmpeg flags' \
+        '--ffmpeg-binary[Path to the ffmpeg executable]:ffmpeg binary:_files' \
+        '--debug_enable[Write the full FFmpeg command to the log for each file]' \
+        '--use-ramdisk[Copy source file to /tmp for potentially faster processing]' \
+        '--output-extension[Output container extension (default\: .mkv)]:extension (e.g. .mkv)' \
+        '--input-extensions[Colon-separated list of input extensions]:extensions (e.g. mp4:mkv:avi)' \
+        '--num-workers[Number of parallel worker processes (default\: 5)]:count' \
+        '--max-retries[Max retry attempts per worker before giving up (default\: 10)]:count'
+}
+
+_dtme "$@"
